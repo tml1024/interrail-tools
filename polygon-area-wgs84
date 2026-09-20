@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""polygon-area-wgs84 -- area of the CONVEX polygon on the Earth's surface bounded
+by a list of named places. The script takes the convex hull of the places (so
+any place that lies inside the hull, or that would only dent it inward, is
+ignored) and reports the exact area of that hull on the WGS-84 ellipsoid.
+
+    Written by Claude on 2026-09-20 using the prompt:
+
+    Write a Python script that takes a list of place names as command
+    line parameters and calculates the area of the polygon on the
+    Earth surface bounded by those places, with great circle arcs
+    connecting them. (Note that one or more locations might be
+    irrelevant if the area is the same size even without them.)
+
+    Followed by further clarification that I want the WGS-84 ellipsoid
+    and that I mean the convex hull.
+
+Usage:
+    python3 polygon-area-wgs84 --user-agent "you youremail@example.com" \
+        Helsinki Stockholm Oslo Copenhagen
+
+The order of the places does NOT matter -- the boundary is the convex hull.
+Quote multi-word names.
+
+Dependencies:
+    pip install geopy geographiclib
+
+  * geopy geocodes the names via OpenStreetMap's Nominatim (needs network; its
+    policy requires a descriptive, unique User-Agent and <=1 request/second --
+    pass --user-agent, the placeholder default will be refused with HTTP 403).
+  * geographiclib computes the exact geodesic polygon area on the WGS-84
+    ellipsoid (Karney's algorithm).
+
+Method: the hull is a true SPHERICAL convex hull. Points are gnomonically
+projected about their centroid -- a gnomonic projection maps great-circle arcs
+to straight lines, so the ordinary planar convex hull of the projected points
+is exactly the spherical convex hull. Collinear and interior points fall out
+naturally (they are not hull vertices). The hull vertices' area is then
+computed exactly on the ellipsoid with geographiclib.
+
+Assumptions: the places span less than a hemisphere (so the gnomonic projection
+is valid). geographiclib handles the antimeridian and poles.
+
+"""
+
+import math
+from geographiclib.geodesic import Geodesic
+
+_GEOD = Geodesic.WGS84
+
+
+def geodesic_polygon_area(points_deg):
+    """Exact area (m^2) of the polygon with vertices (lat, lon) in degrees, edges
+    being geodesics on the WGS-84 ellipsoid. Polygon is closed automatically."""
+    if len(points_deg) < 3:
+        return 0.0
+    p = _GEOD.Polygon()
+    for lat, lon in points_deg:
+        p.AddPoint(lat, lon)
+    _num, _perimeter, area = p.Compute()  # signed m^2
+    return abs(area)
+
+
+def _centroid(points_deg):
+    """Unit-vector mean of the points, back as (lat, lon) degrees."""
+    x = y = z = 0.0
+    for lat, lon in points_deg:
+        la, lo = math.radians(lat), math.radians(lon)
+        cl = math.cos(la)
+        x += cl * math.cos(lo)
+        y += cl * math.sin(lo)
+        z += math.sin(la)
+    return (math.degrees(math.atan2(z, math.hypot(x, y))),
+            math.degrees(math.atan2(y, x)))
+
+
+def _gnomonic(lat, lon, lat0, lon0):
+    """Gnomonic projection about (lat0, lon0): great circles -> straight lines."""
+    la, lo, la0, lo0 = map(math.radians, (lat, lon, lat0, lon0))
+    cosc = (math.sin(la0) * math.sin(la)
+            + math.cos(la0) * math.cos(la) * math.cos(lo - lo0))
+    if cosc <= 1e-9:
+        raise SystemExit("A place is more than ~90 deg from the group's centre; "
+                         "the points are too spread out for this method.")
+    x = math.cos(la) * math.sin(lo - lo0) / cosc
+    y = ((math.cos(la0) * math.sin(la)
+          - math.sin(la0) * math.cos(la) * math.cos(lo - lo0)) / cosc)
+    return x, y
+
+
+def _cross(o, a, b):
+    return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+
+def convex_hull_indices(points_deg):
+    """Indices of the points forming the spherical convex hull, in boundary
+    (counter-clockwise) order. Interior and collinear points are excluded."""
+    lat0, lon0 = _centroid(points_deg)
+    xy = [(*_gnomonic(lat, lon, lat0, lon0), i)
+          for i, (lat, lon) in enumerate(points_deg)]
+    pts = sorted(xy, key=lambda p: (p[0], p[1]))
+    if len(pts) <= 2:
+        return [p[2] for p in pts]
+    lower = []
+    for p in pts:
+        while len(lower) >= 2 and _cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    upper = []
+    for p in reversed(pts):
+        while len(upper) >= 2 and _cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    return [p[2] for p in (lower[:-1] + upper[:-1])]
+
+
+def run_selftest():
+    ok = True
+
+    # 1) Interior point is dropped; hull area == explicit outer triangle.
+    #    (Stockholm sits inside Helsinki-Oslo-Copenhagen.)
+    nordic = [(60.17, 24.94), (59.33, 18.07), (59.91, 10.75), (55.68, 12.57)]
+    hull = convex_hull_indices(nordic)
+    dropped = [i for i in range(len(nordic)) if i not in hull]
+    hull_area = geodesic_polygon_area([nordic[i] for i in hull])
+    tri_area = geodesic_polygon_area([nordic[0], nordic[2], nordic[3]])
+    print(f"[1] dropped index {dropped} (expect [1]); hull = {hull_area/1e6:,.0f} km^2, "
+          f"triangle = {tri_area/1e6:,.0f} km^2")
+    ok &= dropped == [1] and abs(hull_area - tri_area) <= 1.0
+
+    # 2) A point at the centre of a square is dropped; area == the square.
+    sq = [(0, 0), (0, 4), (4, 4), (4, 0), (2, 2)]
+    h2 = convex_hull_indices(sq)
+    a_sq = geodesic_polygon_area([sq[i] for i in h2])
+    a_ref = geodesic_polygon_area(sq[:4])
+    print(f"[2] square+centre dropped {[i for i in range(5) if i not in h2]} "
+          f"(expect [4]); area {a_sq/1e6:,.3f} vs {a_ref/1e6:,.3f} km^2")
+    ok &= (4 not in h2) and abs(a_sq - a_ref) <= 1.0
+
+    # 3) A collinear point on an edge is dropped (not a hull vertex).
+    edge = [(0, 0), (0, 2), (0, 4), (4, 4), (4, 0)]  # (0,2) on the lon=0 edge
+    h3 = convex_hull_indices(edge)
+    print(f"[3] collinear-on-edge dropped {[i for i in range(5) if i not in h3]} "
+          f"(expect [1])")
+    ok &= 1 not in h3
+
+    # 4) Hull area is orientation-independent (abs of signed area).
+    fwd = geodesic_polygon_area([nordic[i] for i in hull])
+    rev = geodesic_polygon_area([nordic[i] for i in reversed(hull)])
+    print(f"[4] hull area fwd = {fwd/1e6:,.3f}  rev = {rev/1e6:,.3f} km^2")
+    ok &= abs(fwd - rev) <= 1.0
+
+    print("SELFTEST:", "PASS" if ok else "FAIL")
+    return ok
+
+
+def geocode_places(names, user_agent):
+    try:
+        from geopy.geocoders import Nominatim
+        from geopy.extra.rate_limiter import RateLimiter
+    except ImportError:
+        raise SystemExit("This needs geopy:  pip install geopy")
+    geocoder = Nominatim(user_agent=user_agent, timeout=10)
+    geocode = RateLimiter(geocoder.geocode, min_delay_seconds=1.1,
+                          swallow_exceptions=False)
+    located = []
+    for name in names:
+        loc = geocode(name)
+        if loc is None:
+            raise SystemExit(f"Could not geocode: {name!r}")
+        located.append((name, loc.latitude, loc.longitude, loc.address))
+    return located
+
+
+def main(argv=None):
+    import argparse
+    ap = argparse.ArgumentParser(
+        description="Area of the convex polygon (convex hull) bounded by named "
+                    "places, on the WGS-84 ellipsoid. Order does not matter.")
+    ap.add_argument("places", nargs="*",
+                    help="Place names (order irrelevant; quote multi-word names).")
+    ap.add_argument("--user-agent",
+                    default="polygon-area-script (set-your-contact@example.com)",
+                    help="Unique User-Agent for Nominatim (its policy REQUIRES a "
+                         "real one; the default placeholder will be refused).")
+    ap.add_argument("--selftest", action="store_true",
+                    help="Run offline self-tests (no network) and exit.")
+    args = ap.parse_args(argv)
+
+    if args.selftest:
+        raise SystemExit(0 if run_selftest() else 1)
+
+    if len(args.places) < 3:
+        raise SystemExit("Need at least 3 place names to bound a polygon.")
+
+    located = geocode_places(args.places, args.user_agent)
+
+    print("Resolved locations:")
+    for name, lat, lon, addr in located:
+        print(f"  {name:<22} {lat:10.5f}, {lon:11.5f}   {addr}")
+
+    pts = [(lat, lon) for (_, lat, lon, _) in located]
+    hull = convex_hull_indices(pts)
+
+    if len(hull) < 3:
+        raise SystemExit("The places are collinear (or coincident): zero area.")
+
+    area_m2 = geodesic_polygon_area([pts[i] for i in hull])
+    km2 = area_m2 / 1e6
+
+    print()
+    print("Convex-hull boundary (in order):")
+    for i in hull:
+        print(f"  {located[i][0]}")
+
+    ignored = [i for i in range(len(pts)) if i not in hull]
+    if ignored:
+        print()
+        print("Ignored (inside the hull, or would only make it concave):")
+        for i in ignored:
+            print(f"  - {located[i][0]}")
+
+    print()
+    print(f"Convex-hull area (WGS-84 ellipsoid): {km2:,.3f} km^2")
+
+
+if __name__ == "__main__":
+    main()
