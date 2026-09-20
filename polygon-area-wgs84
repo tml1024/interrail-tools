@@ -41,6 +41,50 @@ Assumptions: the places span less than a hemisphere (so the gnomonic projection
 is valid). geographiclib handles the antimeridian and poles.
 """
 
+# ---------------------------------------------------------------------------
+# How this script was produced
+# ---------------------------------------------------------------------------
+# Written iteratively in a conversation with an AI assistant (Claude), from the
+# following user prompts, each of which reshaped the script:
+#
+#   1. "Write a Python script that takes a list of place names as command-line
+#      parameters and calculates the area of the polygon on the Earth's surface
+#      bounded by those places, with great-circle arcs connecting them. (Note
+#      that one or more locations might be irrelevant if the area is the same
+#      even without them.)"
+#         -> geocode the names and compute a spherical polygon area.
+#
+#   2. On being asked whether that assumed a spherical Earth: "Yes please swap
+#      to using geographiclib, no need to make it optional."
+#         -> replaced the spherical formula with exact WGS-84 ellipsoidal
+#            (geodesic) area via geographiclib.
+#
+#   3. "...The polygon should be convex, points that make it concave (reduce its
+#      area) should be ignored."  (prompted by noticing that dropping an
+#      interior city, Stockholm, made the area larger)
+#         -> compute the convex hull of the places; interior/concave points are
+#            dropped. Implemented as a true spherical hull (gnomonic projection
+#            + planar convex hull), which also subsumes the earlier "irrelevant
+#            point" note (collinear points are simply not hull vertices).
+#
+#   4. Housekeeping: "1) Call the script polygon-area-wgs84  2) Remove the
+#      square miles information  3) Don't bother with double-quotes around
+#      single-word place names in the Usage."
+#
+#   5. "Now add code to optionally produce a visualisation of the convex hull.
+#      Like a view of the Earth with coastlines and the corner points of the
+#      polygon. Output could be a PNG or JPEG file."
+#         -> optional --plot output using matplotlib + cartopy (coastlines,
+#            filled hull with geodesic edges, labelled corner/ignored points).
+#
+#   6. "Please add a comment describing how the script was produced,
+#      summarising the prompts I presented."  -> this comment.
+#
+# Along the way, a Nominatim "HTTP 403" (caused by the placeholder User-Agent)
+# led to requiring a real --user-agent and to disabling geopy's silent
+# exception-swallowing so failures surface clearly.
+# ---------------------------------------------------------------------------
+
 import math
 from geographiclib.geodesic import Geodesic
 
